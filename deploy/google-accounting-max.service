@@ -1,0 +1,16 @@
+[Unit]
+Description=Google Sheets accounting MAX bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Каталог клона: .venv, .env, service_account.json, run.py. Подставьте свой путь.
+WorkingDirectory=/root/google_sheets_max_bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/sh -c 'exec /root/google_sheets_max_bot/.venv/bin/python /root/google_sheets_max_bot/run.py'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
