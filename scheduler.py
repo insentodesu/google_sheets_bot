@@ -111,6 +111,35 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
         )
         raise
 
+    missing_with_command = 0
+    if was_initialized:
+        for row in rows:
+            rk = dedup_store.build_row_key(row.sheet_name, row.row_number)
+            ds = command_dedup_signature(
+                str(row.values.get(command_header_key, "")).strip()
+            )
+            if not ds:
+                continue
+            if rk not in previous_snapshot:
+                missing_with_command += 1
+
+    silent_catchup_bulk_missing = (
+        config.CATCHUP_SILENT_MISSING_ROWS_THRESHOLD > 0
+        and was_initialized
+        and missing_with_command > config.CATCHUP_SILENT_MISSING_ROWS_THRESHOLD
+        and not config.TABLE_COMMAND_SEND_EVERY_POLL
+    )
+    if silent_catchup_bulk_missing:
+        logger.warning(
+            "Строк с «%s», которых нет в SQLite-снимке: %s (порог тихого догона %s). "
+            "Уведомления в MAX только если меняется значение у строки уже из снимка; "
+            "остальное записываем без отправки.",
+            config.TABLE_COMMAND_COLUMN,
+            missing_with_command,
+            config.CATCHUP_SILENT_MISSING_ROWS_THRESHOLD,
+        )
+
+    catchup_rows_recorded = 0
     for row in rows:
         sheet_disp = dedup_store.canonical_sheet_title_for_dedup(row.sheet_name)
         row_key = dedup_store.build_row_key(row.sheet_name, row.row_number)
@@ -142,6 +171,18 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
 
         if dedup_sig == stored_command_dedup_key(previous_command) and not config.TABLE_COMMAND_SEND_EVERY_POLL:
             skipped_same_command += 1
+            next_snapshot.append(
+                dedup_store.SnapshotEntry(
+                    row_key=row_key,
+                    sheet_name=sheet_disp,
+                    row_number=row.row_number,
+                    command=dedup_sig,
+                )
+            )
+            continue
+
+        if silent_catchup_bulk_missing and row_key not in previous_snapshot:
+            catchup_rows_recorded += 1
             next_snapshot.append(
                 dedup_store.SnapshotEntry(
                     row_key=row_key,
@@ -208,7 +249,8 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
     cmd_fp = command_column_fingerprint(rows, command_header_key)
     logger.info(
         "Опрос: строк в файле=%s, с заполненным «%s»=%s, отправлено в MAX=%s, cmd_fp=%s | "
-        "дедуп: было ключей=%s, в новом снимке=%s, совпало с прошлым=%s",
+        "дедуп: было ключей=%s, в новом снимке=%s, совпало с прошлым=%s | "
+        "нет в снимке с командой=%s, тихо записано при догоне=%s",
         len(rows),
         config.TABLE_COMMAND_COLUMN,
         rows_with_command,
@@ -217,6 +259,8 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
         len(previous_snapshot),
         len(next_snapshot),
         skipped_same_command,
+        missing_with_command,
+        catchup_rows_recorded,
     )
 
     if (

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import dedup_store
 import scheduler
+from message_templates import command_dedup_signature
 from maxapi.enums.parse_mode import ParseMode
 from table_client import SpreadsheetRow
 
@@ -258,4 +259,67 @@ def test_process_pending_rows_tracks_rows_per_sheet(tmp_path, monkeypatch):
     assert first_count == 0
     assert second_count == 1
     bot.send_message.assert_called_once()
+    dedup_store._db_path = None
+
+
+def test_bulk_missing_rows_triggers_silent_catchup(tmp_path, monkeypatch):
+    """Много строк без записи в SQLite при живой БД — только снимок, без MAX."""
+    dedup_store._db_path = str(tmp_path / "scheduler_catchup.db")
+    monkeypatch.setattr(scheduler.config, "MAX_CHAT_ID", 123456)
+    monkeypatch.setattr(scheduler.config, "SEND_MODE", "max")
+    monkeypatch.setattr(scheduler.config, "CATCHUP_SILENT_MISSING_ROWS_THRESHOLD", 5)
+
+    sig_a = command_dedup_signature("Альфа, Счет")
+    dedup_store.replace_snapshot(
+        [
+            dedup_store.SnapshotEntry(
+                row_key=dedup_store.build_row_key("Январь", 2),
+                sheet_name="Янв",
+                row_number=2,
+                command=sig_a,
+            )
+        ]
+    )
+
+    rows = [make_row("Альфа, Счет", row_number=2)]
+    for i in range(6):
+        rows.append(make_row("Точка, Счет", row_number=10 + i))
+
+    bot = AsyncMock()
+    sent = asyncio.run(scheduler.process_pending_rows(bot, SequenceClient([rows])))
+    assert sent == 0
+    bot.send_message.assert_not_called()
+    assert len(dedup_store.load_snapshot()) == 7
+
+    dedup_store._db_path = None
+
+
+def test_known_row_edit_still_sends_when_bulk_missing(tmp_path, monkeypatch):
+    """При тихом догоне изменение уже известной строки всё равно шлётся в MAX."""
+    dedup_store._db_path = str(tmp_path / "scheduler_catchup_edit.db")
+    monkeypatch.setattr(scheduler.config, "MAX_CHAT_ID", 123456)
+    monkeypatch.setattr(scheduler.config, "SEND_MODE", "max")
+    monkeypatch.setattr(scheduler.config, "CATCHUP_SILENT_MISSING_ROWS_THRESHOLD", 5)
+
+    sig_a = command_dedup_signature("Альфа, Счет")
+    dedup_store.replace_snapshot(
+        [
+            dedup_store.SnapshotEntry(
+                row_key=dedup_store.build_row_key("Январь", 2),
+                sheet_name="Янв",
+                row_number=2,
+                command=sig_a,
+            )
+        ]
+    )
+
+    rows = [make_row("Точка, Счет", row_number=2)]
+    for i in range(6):
+        rows.append(make_row("Точка, Счет", row_number=10 + i))
+
+    bot = AsyncMock()
+    sent = asyncio.run(scheduler.process_pending_rows(bot, SequenceClient([rows])))
+    assert sent == 1
+    bot.send_message.assert_called_once()
+
     dedup_store._db_path = None
