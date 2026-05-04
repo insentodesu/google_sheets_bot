@@ -207,13 +207,32 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
     )
     cmd_fp = command_column_fingerprint(rows, command_header_key)
     logger.info(
-        "Опрос: строк в файле=%s, с заполненным «%s»=%s, отправлено в MAX=%s, cmd_fp=%s",
+        "Опрос: строк в файле=%s, с заполненным «%s»=%s, отправлено в MAX=%s, cmd_fp=%s | "
+        "дедуп: было ключей=%s, в новом снимке=%s, совпало с прошлым=%s",
         len(rows),
         config.TABLE_COMMAND_COLUMN,
         rows_with_command,
         sent_count,
         cmd_fp,
+        len(previous_snapshot),
+        len(next_snapshot),
+        skipped_same_command,
     )
+
+    if (
+        was_initialized
+        and sent_count >= 40
+        and skipped_same_command == 0
+        and rows_with_command >= 80
+    ):
+        logger.warning(
+            "За один опрос отправлено %s сообщений и ни одна строка не совпала с предыдущим снимком — "
+            "обычно так бывает при пустом/битом SQLite или после смены логики ключей листов. "
+            "Проверьте «строк в снимке» при старте и при необходимости сделайте тихий сброс: "
+            "stop → rm %s → start при BOOTSTRAP_SEND_MAX=false.",
+            sent_count,
+            config.DATABASE_PATH,
+        )
 
     # Обычное состояние после рассылки: таблица не менялась — не засоряем journalctl WARNING каждые N секунд.
     if (
@@ -262,12 +281,21 @@ async def run_scheduler_loop() -> None:
     dedup_store.ensure_bound_google_spreadsheet(config.GOOGLE_SPREADSHEET_ID)
     dedup_store.ensure_month_sheet_row_keys_canonical()
     snap_init = dedup_store.snapshot_initialized()
+    snap_rows = len(dedup_store.load_snapshot())
+    if snap_init and snap_rows == 0:
+        logger.warning(
+            "В SQLite помечено snapshot_initialized=true, но таблица снимка пустая — "
+            "бот воспринимает все строки с командой как новые и может заспамить MAX. "
+            "Остановите сервис и удалите файл БД (%s), затем запустите снова при BOOTSTRAP_SEND_MAX=false "
+            "(первый опрос заполнит снимок без отправки).",
+            config.DATABASE_PATH,
+        )
     bot = create_bot() if config.SEND_MODE == "max" else None
     client = TableClient()
     # Одна строка: по ней в journalctl видно версию кода, .env (BOOTSTRAP_SEND_MAX) и был ли уже снимок в БД.
     logger.info(
         "Старт бота | mode=%s poll=%ss | BOOTSTRAP_SEND_MAX=%s | snapshot_initialized=%s | "
-        "Google spreadsheet=%s | листы=%s | BASE_DIR=%s | scheduler=%s | БД=%s | колонка=%s",
+        "Google spreadsheet=%s | листы=%s | BASE_DIR=%s | scheduler=%s | БД=%s | колонка=%s | строк в снимке=%s",
         config.SEND_MODE,
         config.POLL_INTERVAL_SECONDS,
         config.BOOTSTRAP_SEND_MAX,
@@ -278,6 +306,7 @@ async def run_scheduler_loop() -> None:
         Path(__file__).resolve(),
         config.DATABASE_PATH,
         config.TABLE_COMMAND_COLUMN,
+        snap_rows,
     )
     if config.BOOTSTRAP_SEND_MAX and snap_init:
         logger.warning(
