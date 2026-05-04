@@ -112,12 +112,13 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
         raise
 
     for row in rows:
+        sheet_disp = dedup_store.canonical_sheet_title_for_dedup(row.sheet_name)
         row_key = dedup_store.build_row_key(row.sheet_name, row.row_number)
         previous_command = previous_snapshot.get(
             row_key,
             dedup_store.SnapshotEntry(
                 row_key=row_key,
-                sheet_name=row.sheet_name,
+                sheet_name=sheet_disp,
                 row_number=row.row_number,
                 command="",
             ),
@@ -132,7 +133,7 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
             next_snapshot.append(
                 dedup_store.SnapshotEntry(
                     row_key=row_key,
-                    sheet_name=row.sheet_name,
+                    sheet_name=sheet_disp,
                     row_number=row.row_number,
                     command=dedup_sig,
                 )
@@ -144,7 +145,7 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
             next_snapshot.append(
                 dedup_store.SnapshotEntry(
                     row_key=row_key,
-                    sheet_name=row.sheet_name,
+                    sheet_name=sheet_disp,
                     row_number=row.row_number,
                     command=dedup_sig,
                 )
@@ -162,7 +163,7 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
             next_snapshot.append(
                 dedup_store.SnapshotEntry(
                     row_key=row_key,
-                    sheet_name=row.sheet_name,
+                    sheet_name=sheet_disp,
                     row_number=row.row_number,
                     command=dedup_sig,
                 )
@@ -171,21 +172,20 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
 
         if not await send_accounting_message(bot, text):
             logger.error("Не удалось отправить строку %s листа %s", row.row_number, row.sheet_name)
-            if previous_command:
-                next_snapshot.append(
-                    dedup_store.SnapshotEntry(
-                        row_key=row_key,
-                        sheet_name=row.sheet_name,
-                        row_number=row.row_number,
-                        command=previous_command,
-                    )
+            next_snapshot.append(
+                dedup_store.SnapshotEntry(
+                    row_key=row_key,
+                    sheet_name=sheet_disp,
+                    row_number=row.row_number,
+                    command=previous_command if previous_command else "",
                 )
+            )
             continue
 
         next_snapshot.append(
             dedup_store.SnapshotEntry(
                 row_key=row_key,
-                sheet_name=row.sheet_name,
+                sheet_name=sheet_disp,
                 row_number=row.row_number,
                 command=dedup_sig,
             )
@@ -260,6 +260,7 @@ async def run_scheduler_loop() -> None:
 
     dedup_store.init_db()
     dedup_store.ensure_bound_google_spreadsheet(config.GOOGLE_SPREADSHEET_ID)
+    dedup_store.ensure_month_sheet_row_keys_canonical()
     snap_init = dedup_store.snapshot_initialized()
     bot = create_bot() if config.SEND_MODE == "max" else None
     client = TableClient()

@@ -66,3 +66,34 @@ def test_replace_snapshot_removes_missing_rows(tmp_path):
 
 def test_build_row_key_includes_sheet_name():
     assert dedup_store.build_row_key("Январь", 2) != dedup_store.build_row_key("Февраль", 2)
+
+
+def test_month_sheet_long_and_short_share_row_key():
+    assert dedup_store.build_row_key("Январь", 10) == dedup_store.build_row_key("Янв", 10)
+
+
+def test_migration_rewrites_legacy_month_row_keys(tmp_path):
+    import sqlite3
+
+    dedup_store._db_path = str(tmp_path / "month_migrate.db")
+    dedup_store.init_db()
+    conn = sqlite3.connect(dedup_store._db_path)
+    conn.execute(
+        """
+        INSERT INTO row_state (row_key, sheet_name, row_number, command)
+        VALUES ('Январь:10', 'Январь', 10, 'Альфа, Счет')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    dedup_store.ensure_month_sheet_row_keys_canonical()
+    snap = dedup_store.load_snapshot()
+    assert dedup_store.build_row_key("Янв", 10) in snap
+    assert snap[dedup_store.build_row_key("Янв", 10)].command == "Альфа, Счет"
+    assert "Январь:10" not in snap
+
+    dedup_store.ensure_month_sheet_row_keys_canonical()
+    assert len(dedup_store.load_snapshot()) == 1
+
+    dedup_store._db_path = None

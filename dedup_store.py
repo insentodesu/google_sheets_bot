@@ -15,6 +15,35 @@ _db_path: str | None = None
 logger = logging.getLogger(__name__)
 
 META_BOUND_SPREADSHEET_KEY = "bound_google_spreadsheet_id"
+META_MONTH_KEYS_CANONICAL_V1 = "month_sheet_row_keys_canonical_v1"
+
+
+def _sheet_match_key(name: str) -> str:
+    """Тот же принцип, что table_client._sheet_name_match_key (без циклического импорта)."""
+    text = str(name or "").replace("\n", " ").replace("\r", " ")
+    return " ".join(text.split()).strip().casefold()
+
+
+def canonical_sheet_title_for_dedup(sheet_name: str) -> str:
+    """Ключ строки в SQLite: Январь и Янв → одно имя (берём короткое из MONTH_SHEET_SHORT_NAMES).
+
+    Так старый снимок после переименования вкладок «Январь»→«Янв» не превращается в лавину повторных отправок.
+    """
+    raw = str(sheet_name or "").strip()
+    sk = _sheet_match_key(raw)
+    if not sk:
+        return raw
+    for idx, full in enumerate(config.MONTH_SHEET_NAMES):
+        if _sheet_match_key(full) == sk:
+            if idx < len(config.MONTH_SHEET_SHORT_NAMES):
+                short = config.MONTH_SHEET_SHORT_NAMES[idx].strip()
+                if short:
+                    return short
+            return full.strip()
+    for idx, short in enumerate(config.MONTH_SHEET_SHORT_NAMES):
+        if short and _sheet_match_key(short) == sk:
+            return short.strip()
+    return raw
 
 
 def get_db_path() -> str:
@@ -66,7 +95,8 @@ class SnapshotEntry:
 
 
 def build_row_key(sheet_name: str, row_number: int) -> str:
-    return f"{sheet_name}:{row_number}"
+    canon = canonical_sheet_title_for_dedup(sheet_name)
+    return f"{canon}:{row_number}"
 
 
 def ensure_bound_google_spreadsheet(spreadsheet_id: str) -> None:
@@ -105,8 +135,8 @@ def ensure_bound_google_spreadsheet(spreadsheet_id: str) -> None:
 
         conn.execute("DELETE FROM row_state")
         conn.execute(
-            "DELETE FROM state_meta WHERE key IN ('snapshot_initialized', ?)",
-            (META_BOUND_SPREADSHEET_KEY,),
+            "DELETE FROM state_meta WHERE key IN ('snapshot_initialized', ?, ?)",
+            (META_BOUND_SPREADSHEET_KEY, META_MONTH_KEYS_CANONICAL_V1),
         )
         conn.execute(
             """
@@ -123,6 +153,79 @@ def ensure_bound_google_spreadsheet(spreadsheet_id: str) -> None:
             prev,
             sid,
         )
+    finally:
+        conn.close()
+
+
+def ensure_month_sheet_row_keys_canonical() -> None:
+    """Один раз переписывает row_key/sheet_name для месячных листов под канонические короткие имена."""
+    init_db()
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cur = conn.execute(
+            "SELECT value FROM state_meta WHERE key = ?", (META_MONTH_KEYS_CANONICAL_V1,)
+        )
+        if cur.fetchone():
+            return
+
+        rows = conn.execute(
+            "SELECT row_key, sheet_name, row_number, command FROM row_state"
+        ).fetchall()
+
+        merged: dict[str, SnapshotEntry] = {}
+        collisions = 0
+        for _old_key, sheet_name, row_number, command in rows:
+            nk = build_row_key(sheet_name, row_number)
+            canon_sheet = canonical_sheet_title_for_dedup(sheet_name)
+            entry = SnapshotEntry(
+                row_key=nk,
+                sheet_name=canon_sheet,
+                row_number=int(row_number),
+                command=str(command),
+            )
+            if nk in merged and merged[nk].command != entry.command:
+                collisions += 1
+                logger.warning(
+                    "Миграция ключей месяцев: конфликт %s — разные команды, оставлена последняя запись.",
+                    nk,
+                )
+            merged[nk] = entry
+
+        conn.execute("DELETE FROM row_state")
+        if merged:
+            conn.executemany(
+                """
+                INSERT INTO row_state (
+                    row_key,
+                    sheet_name,
+                    row_number,
+                    command,
+                    last_seen_at
+                ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                [
+                    (e.row_key, e.sheet_name, e.row_number, e.command)
+                    for e in merged.values()
+                ],
+            )
+
+        conn.execute(
+            """
+            INSERT INTO state_meta (key, value)
+            VALUES (?, '1')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (META_MONTH_KEYS_CANONICAL_V1,),
+        )
+        conn.commit()
+
+        if rows:
+            logger.info(
+                "Миграция ключей месячных листов в SQLite: переписано строк снимка %s → уникальных ключей %s%s.",
+                len(rows),
+                len(merged),
+                f", конфликтов {collisions}" if collisions else "",
+            )
     finally:
         conn.close()
 
