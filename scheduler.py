@@ -30,6 +30,16 @@ logger = logging.getLogger(__name__)
 _last_dedup_status_log_at: float = 0.0
 
 
+def _max_api_rate_limited(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "429" in msg
+        or "too.many.requests" in msg
+        or "too-many-chat" in msg
+        or "too_many" in msg
+    )
+
+
 def _maybe_log_dedup_no_send_hint(skipped_same_command: int) -> None:
     """Редкое INFO: при дедупе без отправок — текст в ячейке не менялся; новое уведомление пойдёт после смены."""
     global _last_dedup_status_log_at
@@ -64,7 +74,10 @@ async def send_accounting_message(bot: Bot | None, text: str) -> bool:
         print(text, flush=True)
         return True
 
-    for attempt in range(config.RETRY_ATTEMPTS):
+    attempt = 0
+    effective_limit = config.RETRY_ATTEMPTS
+
+    while attempt < effective_limit:
         try:
             if bot is None:
                 raise RuntimeError("MAX bot is not initialized")
@@ -75,14 +88,28 @@ async def send_accounting_message(bot: Bot | None, text: str) -> bool:
             )
             return True
         except Exception as exc:
-            logger.warning(
-                "Ошибка отправки в MAX (попытка %s/%s): %s",
-                attempt + 1,
-                config.RETRY_ATTEMPTS,
-                exc,
-            )
-            if attempt < config.RETRY_ATTEMPTS - 1:
-                await asyncio.sleep(config.RETRY_DELAY_SECONDS)
+            attempt += 1
+            if _max_api_rate_limited(exc):
+                effective_limit = max(effective_limit, config.MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS)
+                delay = float(config.MAX_RATE_LIMIT_BACKOFF_SECONDS)
+                logger.warning(
+                    "Лимит MAX при отправке (429 / rate limit): пауза %.1f с, попытка %s/%s: %s",
+                    delay,
+                    attempt,
+                    effective_limit,
+                    exc,
+                )
+            else:
+                delay = float(config.RETRY_DELAY_SECONDS)
+                logger.warning(
+                    "Ошибка отправки в MAX (попытка %s/%s): %s",
+                    attempt,
+                    effective_limit,
+                    exc,
+                )
+            if attempt >= effective_limit:
+                break
+            await asyncio.sleep(delay)
     return False
 
 
@@ -171,15 +198,14 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
 
         if not await send_accounting_message(bot, text):
             logger.error("Не удалось отправить строку %s листа %s", row.row_number, row.sheet_name)
-            if previous_command:
-                next_snapshot.append(
-                    dedup_store.SnapshotEntry(
-                        row_key=row_key,
-                        sheet_name=row.sheet_name,
-                        row_number=row.row_number,
-                        command=previous_command,
-                    )
+            next_snapshot.append(
+                dedup_store.SnapshotEntry(
+                    row_key=row_key,
+                    sheet_name=row.sheet_name,
+                    row_number=row.row_number,
+                    command=previous_command or "",
                 )
+            )
             continue
 
         next_snapshot.append(
@@ -197,6 +223,8 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
             row.row_number,
             raw_command,
         )
+        if config.MAX_MESSAGE_INTERVAL_SECONDS > 0:
+            await asyncio.sleep(config.MAX_MESSAGE_INTERVAL_SECONDS)
 
     dedup_store.replace_snapshot(next_snapshot)
 

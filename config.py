@@ -59,6 +59,14 @@ POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 TABLE_LOAD_TIMEOUT_SECONDS: float = float(os.getenv("TABLE_LOAD_TIMEOUT_SECONDS", "180") or "180")
 RETRY_ATTEMPTS: int = int(os.getenv("RETRY_ATTEMPTS", "2"))
 RETRY_DELAY_SECONDS: int = int(os.getenv("RETRY_DELAY_SECONDS", "2"))
+# Пауза между успешными send_message в один опрос — снижает 429 от MAX («too many chat messages»).
+MAX_MESSAGE_INTERVAL_SECONDS: float = float(os.getenv("MAX_MESSAGE_INTERVAL_SECONDS", "0.35") or "0")
+# При 429 повторяем дольше и реже; см. scheduler.send_accounting_message
+MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS: int = max(
+    RETRY_ATTEMPTS,
+    int(os.getenv("MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS", "15") or "15"),
+)
+MAX_RATE_LIMIT_BACKOFF_SECONDS: float = float(os.getenv("MAX_RATE_LIMIT_BACKOFF_SECONDS", "30") or "30")
 
 DATABASE_PATH: str = os.getenv(
     "DATABASE_PATH",
