@@ -28,6 +28,27 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 _last_dedup_status_log_at: float = 0.0
+# Не слать в MAX, пока не истечёт окно после 429 (monotonic).
+_max_chat_quiet_until: float = 0.0
+
+
+def _bump_max_chat_quiet(seconds: float) -> None:
+    global _max_chat_quiet_until
+    until = time.monotonic() + max(0.0, seconds)
+    if until > _max_chat_quiet_until:
+        _max_chat_quiet_until = until
+
+
+async def _await_max_chat_quiet() -> None:
+    global _max_chat_quiet_until
+    now = time.monotonic()
+    if now < _max_chat_quiet_until:
+        wait = _max_chat_quiet_until - now
+        logger.info(
+            "Пауза после лимита MAX: ждём ещё %.0f с перед следующей отправкой (MAX_GLOBAL_COOLDOWN_AFTER_429).",
+            wait,
+        )
+        await asyncio.sleep(wait)
 
 
 def _max_api_rate_limited(exc: BaseException) -> bool:
@@ -74,10 +95,11 @@ async def send_accounting_message(bot: Bot | None, text: str) -> bool:
         print(text, flush=True)
         return True
 
-    attempt = 0
-    effective_limit = config.RETRY_ATTEMPTS
+    rate_attempts = 0
+    other_attempts = 0
 
-    while attempt < effective_limit:
+    while True:
+        await _await_max_chat_quiet()
         try:
             if bot is None:
                 raise RuntimeError("MAX bot is not initialized")
@@ -88,29 +110,33 @@ async def send_accounting_message(bot: Bot | None, text: str) -> bool:
             )
             return True
         except Exception as exc:
-            attempt += 1
             if _max_api_rate_limited(exc):
-                effective_limit = max(effective_limit, config.MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS)
+                rate_attempts += 1
+                _bump_max_chat_quiet(float(config.MAX_GLOBAL_COOLDOWN_AFTER_429_SECONDS))
                 delay = float(config.MAX_RATE_LIMIT_BACKOFF_SECONDS)
                 logger.warning(
-                    "Лимит MAX при отправке (429 / rate limit): пауза %.1f с, попытка %s/%s: %s",
+                    "Лимит MAX (429): глобальная пауза %s с, ожидание %.0f с, попытка %s/%s: %s",
+                    config.MAX_GLOBAL_COOLDOWN_AFTER_429_SECONDS,
                     delay,
-                    attempt,
-                    effective_limit,
+                    rate_attempts,
+                    config.MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS,
                     exc,
                 )
-            else:
-                delay = float(config.RETRY_DELAY_SECONDS)
-                logger.warning(
-                    "Ошибка отправки в MAX (попытка %s/%s): %s",
-                    attempt,
-                    effective_limit,
-                    exc,
-                )
-            if attempt >= effective_limit:
-                break
-            await asyncio.sleep(delay)
-    return False
+                if rate_attempts >= config.MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS:
+                    return False
+                await asyncio.sleep(delay)
+                continue
+
+            other_attempts += 1
+            logger.warning(
+                "Ошибка отправки в MAX (попытка %s/%s): %s",
+                other_attempts,
+                config.RETRY_ATTEMPTS,
+                exc,
+            )
+            if other_attempts >= config.RETRY_ATTEMPTS:
+                return False
+            await asyncio.sleep(float(config.RETRY_DELAY_SECONDS))
 
 
 async def process_pending_rows(bot: Bot | None, client: TableClient | None = None) -> int:
