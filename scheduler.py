@@ -28,37 +28,6 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 _last_dedup_status_log_at: float = 0.0
-# Не слать в MAX, пока не истечёт окно после 429 (monotonic).
-_max_chat_quiet_until: float = 0.0
-
-
-def _bump_max_chat_quiet(seconds: float) -> None:
-    global _max_chat_quiet_until
-    until = time.monotonic() + max(0.0, seconds)
-    if until > _max_chat_quiet_until:
-        _max_chat_quiet_until = until
-
-
-async def _await_max_chat_quiet() -> None:
-    global _max_chat_quiet_until
-    now = time.monotonic()
-    if now < _max_chat_quiet_until:
-        wait = _max_chat_quiet_until - now
-        logger.info(
-            "Пауза после лимита MAX: ждём ещё %.0f с перед следующей отправкой (MAX_GLOBAL_COOLDOWN_AFTER_429).",
-            wait,
-        )
-        await asyncio.sleep(wait)
-
-
-def _max_api_rate_limited(exc: BaseException) -> bool:
-    msg = str(exc).lower()
-    return (
-        "429" in msg
-        or "too.many.requests" in msg
-        or "too-many-chat" in msg
-        or "too_many" in msg
-    )
 
 
 def _maybe_log_dedup_no_send_hint(skipped_same_command: int) -> None:
@@ -95,11 +64,7 @@ async def send_accounting_message(bot: Bot | None, text: str) -> bool:
         print(text, flush=True)
         return True
 
-    rate_attempts = 0
-    other_attempts = 0
-
-    while True:
-        await _await_max_chat_quiet()
+    for attempt in range(config.RETRY_ATTEMPTS):
         try:
             if bot is None:
                 raise RuntimeError("MAX bot is not initialized")
@@ -110,33 +75,15 @@ async def send_accounting_message(bot: Bot | None, text: str) -> bool:
             )
             return True
         except Exception as exc:
-            if _max_api_rate_limited(exc):
-                rate_attempts += 1
-                _bump_max_chat_quiet(float(config.MAX_GLOBAL_COOLDOWN_AFTER_429_SECONDS))
-                delay = float(config.MAX_RATE_LIMIT_BACKOFF_SECONDS)
-                logger.warning(
-                    "Лимит MAX (429): глобальная пауза %s с, ожидание %.0f с, попытка %s/%s: %s",
-                    config.MAX_GLOBAL_COOLDOWN_AFTER_429_SECONDS,
-                    delay,
-                    rate_attempts,
-                    config.MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS,
-                    exc,
-                )
-                if rate_attempts >= config.MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS:
-                    return False
-                await asyncio.sleep(delay)
-                continue
-
-            other_attempts += 1
             logger.warning(
                 "Ошибка отправки в MAX (попытка %s/%s): %s",
-                other_attempts,
+                attempt + 1,
                 config.RETRY_ATTEMPTS,
                 exc,
             )
-            if other_attempts >= config.RETRY_ATTEMPTS:
-                return False
-            await asyncio.sleep(float(config.RETRY_DELAY_SECONDS))
+            if attempt < config.RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(config.RETRY_DELAY_SECONDS)
+    return False
 
 
 async def process_pending_rows(bot: Bot | None, client: TableClient | None = None) -> int:
@@ -224,14 +171,15 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
 
         if not await send_accounting_message(bot, text):
             logger.error("Не удалось отправить строку %s листа %s", row.row_number, row.sheet_name)
-            next_snapshot.append(
-                dedup_store.SnapshotEntry(
-                    row_key=row_key,
-                    sheet_name=row.sheet_name,
-                    row_number=row.row_number,
-                    command=previous_command or "",
+            if previous_command:
+                next_snapshot.append(
+                    dedup_store.SnapshotEntry(
+                        row_key=row_key,
+                        sheet_name=row.sheet_name,
+                        row_number=row.row_number,
+                        command=previous_command,
+                    )
                 )
-            )
             continue
 
         next_snapshot.append(
@@ -249,8 +197,6 @@ async def process_pending_rows(bot: Bot | None, client: TableClient | None = Non
             row.row_number,
             raw_command,
         )
-        if config.MAX_MESSAGE_INTERVAL_SECONDS > 0:
-            await asyncio.sleep(config.MAX_MESSAGE_INTERVAL_SECONDS)
 
     dedup_store.replace_snapshot(next_snapshot)
 

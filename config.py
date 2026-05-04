@@ -59,18 +59,6 @@ POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 TABLE_LOAD_TIMEOUT_SECONDS: float = float(os.getenv("TABLE_LOAD_TIMEOUT_SECONDS", "180") or "180")
 RETRY_ATTEMPTS: int = int(os.getenv("RETRY_ATTEMPTS", "2"))
 RETRY_DELAY_SECONDS: int = int(os.getenv("RETRY_DELAY_SECONDS", "2"))
-# Пауза между успешными send_message в одном опросе (MAX: too-many-chat-messages при слишком частой отправке).
-MAX_MESSAGE_INTERVAL_SECONDS: float = float(os.getenv("MAX_MESSAGE_INTERVAL_SECONDS", "1.25") or "1.25")
-# При 429 на одно сообщение: не более стольких ожиданий MAX_RATE_LIMIT_BACKOFF_SECONDS, затем уходим до следующего цикла опроса.
-MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS: int = max(
-    1,
-    int(os.getenv("MAX_SEND_RATE_LIMIT_MAX_ATTEMPTS", "2") or "2"),
-)
-MAX_RATE_LIMIT_BACKOFF_SECONDS: float = float(os.getenv("MAX_RATE_LIMIT_BACKOFF_SECONDS", "90") or "90")
-# После любого 429 перед следующей отправкой в этот же процесс — не штурмовать API (сек).
-MAX_GLOBAL_COOLDOWN_AFTER_429_SECONDS: float = float(
-    os.getenv("MAX_GLOBAL_COOLDOWN_AFTER_429_SECONDS", "120") or "120"
-)
 
 DATABASE_PATH: str = os.getenv(
     "DATABASE_PATH",
