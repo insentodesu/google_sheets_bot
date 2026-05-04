@@ -91,6 +91,17 @@ def test_select_worksheets_by_table_sheet_name_fuzzy(monkeypatch):
     assert out == [w1]
 
 
+def test_select_worksheets_month_abbreviations(monkeypatch):
+    monkeypatch.setattr(config, "GOOGLE_WORKSHEET_GID", None)
+    monkeypatch.setattr(config, "TABLE_SHEET_NAME", "")
+    sheets = [MagicMock(title=m) for m in ("Янв", "Февр", "Март")]
+    sh = MagicMock()
+    sh.worksheets.return_value = sheets
+    client = TableClient()
+    out = client._select_worksheets(sh)
+    assert [w.title for w in out] == ["Янв", "Февр", "Март"]
+
+
 def test_select_worksheets_month_order(monkeypatch):
     monkeypatch.setattr(config, "GOOGLE_WORKSHEET_GID", None)
     monkeypatch.setattr(config, "TABLE_SHEET_NAME", "")

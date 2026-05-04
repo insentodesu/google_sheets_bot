@@ -177,10 +177,23 @@ class TableClient:
                 by_key[k] = w
 
         month_sheets: list[gspread.Worksheet] = []
-        for month in config.MONTH_SHEET_NAMES:
-            k = _sheet_name_match_key(month)
-            if k in by_key:
-                month_sheets.append(by_key[k])
+        for idx, month in enumerate(config.MONTH_SHEET_NAMES):
+            candidates = [month]
+            if idx < len(config.MONTH_SHEET_SHORT_NAMES):
+                short = config.MONTH_SHEET_SHORT_NAMES[idx].strip()
+                if short:
+                    nk = _sheet_name_match_key(month)
+                    sk = _sheet_name_match_key(short)
+                    if sk and sk != nk:
+                        candidates.append(short)
+            picked: gspread.Worksheet | None = None
+            for cand in candidates:
+                k = _sheet_name_match_key(cand)
+                if k and k in by_key:
+                    picked = by_key[k]
+                    break
+            if picked is not None and picked not in month_sheets:
+                month_sheets.append(picked)
 
         if month_sheets:
             logger.info(
