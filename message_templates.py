@@ -45,6 +45,16 @@ def _is_ip_style_command(command: str) -> bool:
     return _compact_command(command).startswith("ип")
 
 
+def _uses_new_tz_invoice_upd_full(command: str) -> bool:
+    """Новый полный блок ТЗ: в тексте есть и «счёт», и «УПД», но не «УПД к Счету»."""
+    if _is_upd_to_invoice_command(command):
+        return False
+    if not _has_upd_keyword(command):
+        return False
+    c = _compact_command(command)
+    return "счет" in c and "упд" in c
+
+
 def _row_map(row: dict[str, Any]) -> dict[str, str]:
     return {
         _normalize_key(key): _normalize_value(value)
@@ -195,13 +205,59 @@ def _build_short_upd_to_invoice(command: str, row: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_legacy_upd_short_body(command: str, row: dict[str, Any]) -> str:
+    """Как раньше: Дата, Клиент, Менеджер, Номер счета — если в команде есть УПД (не новые шаблоны)."""
+    lines: list[str] = []
+    brand = config.UPD_MESSAGE_BRAND.strip()
+    if brand:
+        lines.append(_bold(brand))
+    lines.append(_bold(_normalize_value(command)))
+    for label, aliases in (
+        ("Дата", ("Дата",)),
+        ("Клиент", ("Клиент", "Заказчик")),
+        ("Менеджер", ("Менеджер",)),
+        ("Номер счета", _INVOICE_NUMBER_ALIASES),
+    ):
+        value = _get(row, *aliases)
+        if not value:
+            continue
+        lines.append(_field_line(label, value))
+    return "\n".join(lines)
+
+
+# Без «УПД» в команде — прежний фиксированный набор колонок (порядок как раньше).
+NON_UPD_FIXED_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Дата", ("Дата",)),
+    ("Клиент", ("Клиент", "Заказчик")),
+    ("Менеджер", ("Менеджер",)),
+    ("Номер счета", _INVOICE_NUMBER_ALIASES),
+    ("Адрес доставки", ("Адрес доставки",)),
+    ("Услуга/товар", ("Услуга/товар", "Услуга товар")),
+    ("Наименование услуги", ("Наименование услуги", "Транспорт")),
+    ("ед. изм.", ("ед. изм.",)),
+    ("Цена клиенту", ("Цена клиенту",)),
+    ("Кол-во", ("Кол-во",)),
+    ("Сумма клиенту", ("Сумма клиенту",)),
+)
+
+
+def _build_legacy_non_upd_body(command: str, row: dict[str, Any]) -> str:
+    lines = [_bold(_normalize_value(command))]
+    for label, aliases in NON_UPD_FIXED_FIELDS:
+        value = _get(row, *aliases)
+        if not value:
+            continue
+        lines.append(_field_line(label, value))
+    return "\n".join(lines)
+
+
 def build_message(
     command: str,
     row: dict[str, Any],
     *,
     command_column_key: str | None = None,
 ) -> str:
-    """Первая строка — текст команды; дальше набор полей зависит от выбранного типа (см. ТЗ)."""
+    """Первая строка — текст команды; новые поля только для явных типов из ТЗ, иначе прежний формат."""
     _ = command_column_key  # аргумент оставлен для совместимости с scheduler.process_pending_rows
     command = command.strip()
     if not command:
@@ -210,4 +266,8 @@ def build_message(
         return _build_short_upd_to_invoice(command, row)
     if _is_ip_style_command(command) and not _has_upd_keyword(command):
         return _build_body_from_fields(command, row, _IP_SEVEN_FIELDS)
-    return _build_body_from_fields(command, row, _FULL_EIGHT_FIELDS)
+    if _uses_new_tz_invoice_upd_full(command):
+        return _build_body_from_fields(command, row, _FULL_EIGHT_FIELDS)
+    if _has_upd_keyword(command):
+        return _build_legacy_upd_short_body(command, row)
+    return _build_legacy_non_upd_body(command, row)
