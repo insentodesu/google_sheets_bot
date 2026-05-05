@@ -24,10 +24,25 @@ def _normalize_command(value: str) -> str:
     return normalized.replace(",", "")
 
 
-def _command_uses_upd_short_format(command: str) -> bool:
-    """Короткое сообщение (опц. бренд + 4 поля), если в тексте команды есть УПД."""
-    t = _normalize_value(command).casefold()
-    return "упд" in t or "upd" in t
+def _compact_command(value: str) -> str:
+    """Нормализация для сопоставления типа команды: без пробелов и запятых, нижний регистр."""
+    return "".join(_normalize_value(value).casefold().split()).replace(",", "")
+
+
+def _has_upd_keyword(command: str) -> bool:
+    c = _normalize_value(command).casefold()
+    return "упд" in c or "upd" in c
+
+
+def _is_upd_to_invoice_command(command: str) -> bool:
+    """«УПД к Счету», в т.ч. «ИП … УПД к Счету» — короткое тело (Счёт, Дата, Менеджер)."""
+    x = _compact_command(command)
+    return x == "упдксчету" or x.endswith("упдксчету")
+
+
+def _is_ip_style_command(command: str) -> bool:
+    """Команда про ИП (ИП Точка, …): без УПД — семь полей без менеджера."""
+    return _compact_command(command).startswith("ип")
 
 
 def _row_map(row: dict[str, Any]) -> dict[str, str]:
@@ -49,7 +64,7 @@ def _get(row: dict[str, Any], *aliases: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class TemplateSpec:
-    """Зарезервировано для совместимости; формат сообщения не зависит от списка команд."""
+    """Зарезервировано для совместимости; формат сообщения задаётся типом команды."""
 
     pass
 
@@ -134,20 +149,31 @@ _INVOICE_NUMBER_ALIASES: tuple[str, ...] = (
     "Счет №",
 )
 
+# Полный набор (Счёт+УПД, обычный счёт с менеджером и т.п.)
+_FULL_EIGHT_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Дата", ("Дата",)),
+    ("Заказчик", ("Заказчик", "Клиент")),
+    ("Транспорт", ("Транспорт", "Наименование услуги")),
+    ("Маршрут", ("Маршрут", "Адрес доставки")),
+    ("Цена Клиенту", ("Цена клиенту", "Цена Клиенту")),
+    ("Количество", ("Кол-во", "Количество")),
+    ("Единица измерения", ("ед. изм.", "Единица измерения")),
+    ("Менеджер", ("Менеджер",)),
+)
 
-def _build_upd_to_invoice_body(command: str, row: dict[str, Any]) -> str:
-    """Только Дата, Клиент, Менеджер, Номер счета — для любой команды, где в тексте есть УПД."""
-    lines: list[str] = []
-    brand = config.UPD_MESSAGE_BRAND.strip()
-    if brand:
-        lines.append(_bold(brand))
-    lines.append(_bold(_normalize_value(command)))
-    for label, aliases in (
-        ("Дата", ("Дата",)),
-        ("Клиент", ("Клиент", "Заказчик")),
-        ("Менеджер", ("Менеджер",)),
-        ("Номер счета", _INVOICE_NUMBER_ALIASES),
-    ):
+# ИП без УПД в тексте команды — без менеджера.
+_IP_SEVEN_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = _FULL_EIGHT_FIELDS[:-1]
+
+_SHORT_UPD_TO_INVOICE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Счет", _INVOICE_NUMBER_ALIASES),
+    ("Дата", ("Дата",)),
+    ("Менеджер", ("Менеджер",)),
+)
+
+
+def _build_body_from_fields(command: str, row: dict[str, Any], fields: tuple[tuple[str, tuple[str, ...]], ...]) -> str:
+    lines = [_bold(_normalize_value(command))]
+    for label, aliases in fields:
         value = _get(row, *aliases)
         if not value:
             continue
@@ -155,25 +181,13 @@ def _build_upd_to_invoice_body(command: str, row: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# Без «УПД» в команде — только эти колонки (порядок фиксирован), остальные из строки не показываем.
-NON_UPD_FIXED_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Дата", ("Дата",)),
-    ("Клиент", ("Клиент", "Заказчик")),
-    ("Менеджер", ("Менеджер",)),
-    ("Номер счета", _INVOICE_NUMBER_ALIASES),
-    ("Адрес доставки", ("Адрес доставки",)),
-    ("Услуга/товар", ("Услуга/товар", "Услуга товар")),
-    ("Наименование услуги", ("Наименование услуги", "Транспорт")),
-    ("ед. изм.", ("ед. изм.",)),
-    ("Цена клиенту", ("Цена клиенту",)),
-    ("Кол-во", ("Кол-во",)),
-    ("Сумма клиенту", ("Сумма клиенту",)),
-)
-
-
-def _build_non_upd_fixed_body(command: str, row: dict[str, Any]) -> str:
-    lines = [_bold(_normalize_value(command))]
-    for label, aliases in NON_UPD_FIXED_FIELDS:
+def _build_short_upd_to_invoice(command: str, row: dict[str, Any]) -> str:
+    lines: list[str] = []
+    brand = config.UPD_MESSAGE_BRAND.strip()
+    if brand:
+        lines.append(_bold(brand))
+    lines.append(_bold(_normalize_value(command)))
+    for label, aliases in _SHORT_UPD_TO_INVOICE_FIELDS:
         value = _get(row, *aliases)
         if not value:
             continue
@@ -187,11 +201,13 @@ def build_message(
     *,
     command_column_key: str | None = None,
 ) -> str:
-    """Первая строка — текст из ячейки «Бухгалтеру в чат»; дальше УПД (4 поля + бренд) или фиксированный набор полей."""
+    """Первая строка — текст команды; дальше набор полей зависит от выбранного типа (см. ТЗ)."""
     _ = command_column_key  # аргумент оставлен для совместимости с scheduler.process_pending_rows
     command = command.strip()
     if not command:
         raise ValueError("Пустой текст команды")
-    if _command_uses_upd_short_format(command):
-        return _build_upd_to_invoice_body(command, row)
-    return _build_non_upd_fixed_body(command, row)
+    if _is_upd_to_invoice_command(command):
+        return _build_short_upd_to_invoice(command, row)
+    if _is_ip_style_command(command) and not _has_upd_keyword(command):
+        return _build_body_from_fields(command, row, _IP_SEVEN_FIELDS)
+    return _build_body_from_fields(command, row, _FULL_EIGHT_FIELDS)
